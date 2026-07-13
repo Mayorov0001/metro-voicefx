@@ -89,6 +89,8 @@ namespace AudioEffects {
 	struct PlayerFXState {
 		HighPassState hp;
 		OnePoleState lp;
+		HighPassState resHp;
+		OnePoleState resLp;
 		RingModState ring;
 		NoiseState noise;
 		PitchShiftState pitch;
@@ -175,6 +177,21 @@ namespace AudioEffects {
 		if (mult == 1.0f) return;
 		for (int i = 0; i < samples; i++) {
 			buf[i] = (int16_t)ClampSample((float)buf[i] * mult);
+		}
+	}
+
+	static int16_t resonantScratch[10 * 1024];
+
+	// Adds a scaled band-limited copy of the signal back onto itself - a cheap
+	// presence/resonance bump in a chosen frequency window, without needing a
+	// full peaking-biquad implementation.
+	void ResonantBoost(int16_t* buf, int samples, HighPassState& hp, OnePoleState& lp, float loHz, float hiHz, float amount) {
+		if (amount <= 0.0f) return;
+		std::memcpy(resonantScratch, buf, samples * sizeof(int16_t));
+		HighPass(resonantScratch, samples, hp, loHz);
+		LowPass(resonantScratch, samples, lp, hiHz);
+		for (int i = 0; i < samples; i++) {
+			buf[i] = (int16_t)ClampSample((float)buf[i] + (float)resonantScratch[i] * amount);
 		}
 	}
 

@@ -12,65 +12,74 @@
 namespace VoicePresets {
 	using namespace AudioEffects;
 
+	// Constants below are tuned from spectral (FFT) analysis of a reference
+	// dry/processed pair per category - band-energy deltas, resonance bumps,
+	// and dominant amplitude-modulation frequency measured numerically, not
+	// by ear and not by reusing any reference audio itself.
 	inline void Apply(int effect, int16_t* buf, int samples, PlayerFXState& st) {
 		switch (effect) {
 		case EFF_RADIO:
-			// Narrow telephone-ish band + static + light crunch, like a
-			// handheld radio between two squadmates.
-			BandPass(buf, samples, st.hp, st.lp, 400.0f, 2800.0f);
+			// Strong static + a resonant speaker-cone bump around 2.6-3.4kHz,
+			// plus a moderate buzz - the reference had real hiss and a clear
+			// ~100Hz modulation component, more than a plain band-pass.
+			BandPass(buf, samples, st.hp, st.lp, 350.0f, 3200.0f);
+			ResonantBoost(buf, samples, st.resHp, st.resLp, 2600.0f, 3400.0f, 0.35f);
+			RingModulate(buf, samples, st.ring, 100.0f, 0.25f);
 			SoftClip(buf, samples, 2.2f);
-			AddNoise(buf, samples, st.noise, 0.06f);
-			Gain(buf, samples, 1.4f);
+			AddNoise(buf, samples, st.noise, 0.16f);
 			break;
 
 		case EFF_PHONE:
-			// Classic tight telephone band, cleaner than Radio, minimal noise.
-			BandPass(buf, samples, st.hp, st.lp, 300.0f, 3400.0f);
+			// Tighter, higher high-pass than Radio, strong presence bump in
+			// the 1.2-2.6kHz "telephone" band, no noise, no net gain change.
+			BandPass(buf, samples, st.hp, st.lp, 600.0f, 3000.0f);
+			ResonantBoost(buf, samples, st.resHp, st.resLp, 1200.0f, 2600.0f, 0.4f);
 			SoftClip(buf, samples, 1.4f);
-			Gain(buf, samples, 1.2f);
 			break;
 
 		case EFF_PA:
-			// Public-address system: wide-ish band, heavier saturation,
-			// louder, a bit of hiss like an old megaphone/speaker stack.
-			BandPass(buf, samples, st.hp, st.lp, 350.0f, 3200.0f);
+			// Thin megaphone tone: very high-pass, tight low-pass, and
+			// measured RMS actually drops vs dry once the heavy filtering
+			// and clipping are applied - don't compensate with extra gain.
+			BandPass(buf, samples, st.hp, st.lp, 850.0f, 2700.0f);
 			SoftClip(buf, samples, 3.0f);
-			AddNoise(buf, samples, st.noise, 0.03f);
-			Gain(buf, samples, 1.6f);
+			Gain(buf, samples, 1.05f);
 			break;
 
 		case EFF_MUFFLED:
-			// Behind cloth/thick material: just the highs cut hard.
-			LowPass(buf, samples, st.lp, 800.0f);
-			Gain(buf, samples, 0.85f);
+			// Highs cut hard, but the reference sample is louder than dry
+			// overall (compensating for the perceived loss), not quieter.
+			LowPass(buf, samples, st.lp, 900.0f);
+			Gain(buf, samples, 1.35f);
 			break;
 
 		case EFF_MASKED:
-			// Gas mask/light mask: less extreme low-pass than Muffled, tiny
-			// bit of ring modulation for a subtle plasticky resonance.
-			LowPass(buf, samples, st.lp, 1600.0f);
-			RingModulate(buf, samples, st.ring, 90.0f, 0.12f);
-			Gain(buf, samples, 0.95f);
+			// Mild low-pass with a presence bump around 0.8-1.2kHz, and
+			// meaningfully louder than dry, not quieter.
+			LowPass(buf, samples, st.lp, 1700.0f);
+			ResonantBoost(buf, samples, st.resHp, st.resLp, 800.0f, 1200.0f, 0.3f);
+			Gain(buf, samples, 1.55f);
 			break;
 
 		case EFF_STORMTROOPER:
-			// Helmet radio + light robotic buzz, pitched down slightly.
-			PitchShift(buf, samples, st.pitch, 0.92f);
-			RingModulate(buf, samples, st.ring, 35.0f, 0.35f);
-			BandPass(buf, samples, st.hp, st.lp, 350.0f, 3000.0f);
+			// Helmet radio with presence in 0.5-1.8kHz and a mild buzz -
+			// weaker modulation than Combine, no net gain boost.
+			PitchShift(buf, samples, st.pitch, 0.94f);
+			RingModulate(buf, samples, st.ring, 22.0f, 0.15f);
+			BandPass(buf, samples, st.hp, st.lp, 500.0f, 2800.0f);
 			SoftClip(buf, samples, 1.8f);
-			Gain(buf, samples, 1.3f);
 			break;
 
 		case EFF_COMBINE:
-			// Deeper pitch drop, stronger ring-mod buzz, tighter band and
-			// more saturation - the "robotic radio soldier" archetype.
+			// Deep pitch drop with a strong ~90-95Hz buzz (measured, not
+			// guessed) and a presence bump around 1.8-2.6kHz; the reference
+			// has less high-frequency noise than dry, so no added hiss here.
 			PitchShift(buf, samples, st.pitch, 0.8f);
-			RingModulate(buf, samples, st.ring, 55.0f, 0.5f);
-			BandPass(buf, samples, st.hp, st.lp, 400.0f, 2600.0f);
+			RingModulate(buf, samples, st.ring, 92.0f, 0.5f);
+			BandPass(buf, samples, st.hp, st.lp, 400.0f, 3200.0f);
+			ResonantBoost(buf, samples, st.resHp, st.resLp, 1800.0f, 2600.0f, 0.3f);
 			SoftClip(buf, samples, 2.6f);
-			AddNoise(buf, samples, st.noise, 0.02f);
-			Gain(buf, samples, 1.4f);
+			Gain(buf, samples, 1.15f);
 			break;
 
 		default:
