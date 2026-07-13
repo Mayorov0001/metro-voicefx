@@ -223,6 +223,85 @@ function VoiceBox.FX.IsValidVoiceFX(fx) return FX_ALIAS[fx] ~= nil end
 -- so this stores the flag for API compatibility but does not change the sound.
 function VoiceBox.FX.SetRadioStaticEnabled(enabled) VoiceBox.FX.__radioStatic = enabled and true or false end
 
+-- ============================================================================
+-- Debug / admin console commands. These work from the SERVER CONSOLE (the
+-- Pterodactyl "Console" tab / RCON) as well as in-game for a superadmin:
+--   metrovoice_presets                 - list available effect names
+--   metrovoice_list                    - show module status + every player's effect
+--   metrovoice_set <player> <preset>   - give a player an effect (player = name / #userid / steamid)
+--   metrovoice_clear <player>          - remove a player's effect
+-- Example from server console:  metrovoice_set Mayorov Combine
+-- ============================================================================
+local function mvAllowed(ply) return (not IsValid(ply)) or ply:IsSuperAdmin() end  -- server console = trusted
+local function mvReply(ply, msg)
+	if IsValid(ply) then ply:PrintMessage(HUD_PRINTCONSOLE, msg) else print(msg) end
+end
+local function mvPresetList()
+	local names = {}
+	for n in pairs(MetroVoice.Presets) do names[#names + 1] = n end
+	table.sort(names)
+	return table.concat(names, ", ")
+end
+local function mvFindPlayer(id)
+	if not id or id == "" then return nil end
+	id = tostring(id)
+	for _, p in ipairs(player.GetAll()) do
+		if tostring(p:UserID()) == id or ("#" .. p:UserID()) == id then return p end
+		if p:SteamID() == id or p:SteamID64() == id then return p end
+	end
+	local low = id:lower()
+	for _, p in ipairs(player.GetAll()) do
+		if p:Nick():lower():find(low, 1, true) then return p end
+	end
+	return nil
+end
+
+concommand.Add("metrovoice_presets", function(ply)
+	if not mvAllowed(ply) then return end
+	mvReply(ply, "[MetroVoiceFX] presets: " .. mvPresetList())
+end)
+
+concommand.Add("metrovoice_list", function(ply)
+	if not mvAllowed(ply) then return end
+	mvReply(ply, "[MetroVoiceFX] module loaded: " .. tostring(metrovoice ~= nil) ..
+		" | players: " .. #player.GetAll())
+	for _, p in ipairs(player.GetAll()) do
+		local fx = p:GetActiveVoiceFX() or appliedState[p:UserID()] or "None"
+		mvReply(ply, string.format("  #%-4d %-24s -> %s", p:UserID(), p:Nick(), fx))
+	end
+end)
+
+concommand.Add("metrovoice_set", function(ply, _, args)
+	if not mvAllowed(ply) then return end
+	local target = mvFindPlayer(args[1])
+	local preset = args[2]
+	if not target then
+		mvReply(ply, "[MetroVoiceFX] player not found: '" .. tostring(args[1]) ..
+			"'. Try name / #userid / steamid (see metrovoice_list).")
+		return
+	end
+	if not preset or not MetroVoice.Presets[preset] then
+		mvReply(ply, "[MetroVoiceFX] unknown preset '" .. tostring(preset) ..
+			"'. Available: " .. mvPresetList())
+		return
+	end
+	target:ClearVoiceFX()
+	target:AddVoiceFX(preset)
+	mvReply(ply, string.format("[MetroVoiceFX] %s -> %s. Have them speak in voice chat.",
+		target:Nick(), preset))
+end)
+
+concommand.Add("metrovoice_clear", function(ply, _, args)
+	if not mvAllowed(ply) then return end
+	local target = mvFindPlayer(args[1])
+	if not target then
+		mvReply(ply, "[MetroVoiceFX] player not found: '" .. tostring(args[1]) .. "'")
+		return
+	end
+	target:ClearVoiceFX()
+	mvReply(ply, "[MetroVoiceFX] cleared effect from " .. target:Nick())
+end)
+
 include("metro_voicefx_config.lua")
 
 local presetCount = 0
