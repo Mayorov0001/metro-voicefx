@@ -28,11 +28,23 @@ jobs:
     - name: Generate Project
       run: |
         premake5 --gmcommon=garrysmod_common gmake
-    - name: Make
+    # premake5 beta8 needs a modern glibc so it runs on the 24.04 host, but
+    # compiling here would bake GLIBC_2.38 symbol refs into the module and it
+    # would fail to load on older server containers. So we only GENERATE the
+    # Makefiles on the host; the actual compile runs inside ubuntu:20.04
+    # (glibc 2.31) so the .dll only needs old, widely-available glibc symbols.
+    # Combined with -static-libstdc++/-static-libgcc (premake5.lua) the module
+    # is self-contained and loads on virtually any GMod host.
+    - name: Make (in ubuntu:20.04 for old-glibc portability)
       run: |
-        cd projects/linux/gmake
-        make
-        make config=releasewithsymbols_x86_64
+        docker run --rm -v "$PWD":/src -w /src ubuntu:20.04 bash -c '
+          set -e
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential g++-multilib
+          cd projects/linux/gmake
+          make
+          make config=releasewithsymbols_x86_64
+        '
     - uses: actions/upload-artifact@v4
       with:
         name: gmsv_metro_voicefx_linux.dll
