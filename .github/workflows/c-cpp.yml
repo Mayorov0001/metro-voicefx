@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [ master, main ]
+    paths-ignore: [ 'bench/**', '.github/workflows/bench.yml' ]
   workflow_dispatch:
 
 jobs:
