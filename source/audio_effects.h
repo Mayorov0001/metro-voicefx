@@ -1,18 +1,13 @@
 // BitCrush/Desample below are unmodified from gm_8bit
-// (https://github.com/Meachamp/gm_8bit), LGPL-2.1. Everything from the
-// "persistent per-player DSP state" section down is new.
+// (https://github.com/Meachamp/gm_8bit), LGPL-2.1. Everything else is new:
+// the voice presets are driven by per-preset FIR filters measured from Null's
+// reference dry/fx pairs (see metro_fir_data.h), applied here as a streaming
+// convolution plus optional ring modulation (Combine) and hiss (Radio).
 #pragma once
 #include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
-#include <algorithm>
-
-// All effects operate on 16-bit signed PCM, mono, 24000Hz (SAMPLERATE_GMOD_OPUS),
-// in chunks of whatever a single voice packet decodes to (usually one or more
-// 480-sample Opus frames back to back). State structs below are kept per-player
-// and must persist across calls so filters/oscillators stay phase-continuous
-// between packets instead of clicking at every packet boundary.
 
 namespace AudioEffects {
 	enum {
@@ -30,6 +25,7 @@ namespace AudioEffects {
 
 	constexpr float SAMPLE_RATE = 24000.0f;
 	constexpr float PI_F = 3.14159265358979323846f;
+	constexpr int METRO_FIR_NTAPS = 513; // must match MetroFIR::NTAPS in metro_fir_data.h
 
 	// ---- legacy gm_8bit effects (kept as-is) ----
 
@@ -59,15 +55,6 @@ namespace AudioEffects {
 
 	// ---- persistent per-player DSP state ----
 
-	struct OnePoleState {
-		float z = 0.0f;
-	};
-
-	struct HighPassState {
-		float z = 0.0f;
-		float prevIn = 0.0f;
-	};
-
 	struct RingModState {
 		double phase = 0.0;
 	};
@@ -76,70 +63,46 @@ namespace AudioEffects {
 		uint32_t rng = 0x9E3779B9u;
 	};
 
-	// Dual-head granular pitch shifter. Fixed-size ring buffer, no allocation,
-	// safe for the hot voice-broadcast path. BUF_SIZE must be a power of two.
-	struct PitchShiftState {
-		static constexpr int BUF_SIZE = 1024;
-		int16_t ring[BUF_SIZE] = { 0 };
-		int writePos = 0;
-		float readPos1 = 0.0f;
-		float readPos2 = BUF_SIZE / 2.0f;
+	// History ring for the streaming FIR, so the filter stays continuous across
+	// voice-packet boundaries instead of clicking every 20ms.
+	struct FIRState {
+		float hist[METRO_FIR_NTAPS] = { 0 };
+		int pos = 0;
 	};
 
 	struct PlayerFXState {
-		HighPassState hp;
-		OnePoleState lp;
-		HighPassState resHp;
-		OnePoleState resLp;
+		FIRState fir;
 		RingModState ring;
 		NoiseState noise;
-		PitchShiftState pitch;
 	};
 
 	// ---- building blocks ----
 
-	// Hand-rolled instead of std::clamp so this doesn't require C++17.
 	inline float ClampSample(float v) {
 		if (v < -32768.0f) return -32768.0f;
 		if (v > 32767.0f) return 32767.0f;
 		return v;
 	}
 
-	// One-pole low-pass. cutoffHz controls how much high end is removed.
-	void LowPass(int16_t* buf, int samples, OnePoleState& st, float cutoffHz) {
-		float rc = 1.0f / (2.0f * PI_F * cutoffHz);
-		float dt = 1.0f / SAMPLE_RATE;
-		float alpha = dt / (rc + dt);
+	// Streaming FIR convolution with the measured per-preset coefficients.
+	// Makeup gain is already folded into the taps, so no separate gain stage.
+	void FIRApply(int16_t* buf, int samples, FIRState& st, const float* taps, int ntaps) {
 		for (int i = 0; i < samples; i++) {
-			st.z += alpha * ((float)buf[i] - st.z);
-			buf[i] = (int16_t)ClampSample(st.z);
+			st.hist[st.pos] = (float)buf[i];
+			float acc = 0.0f;
+			int idx = st.pos;
+			for (int k = 0; k < ntaps; k++) {
+				acc += taps[k] * st.hist[idx];
+				idx--; if (idx < 0) idx = ntaps - 1;
+			}
+			buf[i] = (int16_t)ClampSample(acc);
+			st.pos++; if (st.pos >= ntaps) st.pos = 0;
 		}
 	}
 
-	// One-pole high-pass. cutoffHz controls how much low end/rumble is removed.
-	void HighPass(int16_t* buf, int samples, HighPassState& st, float cutoffHz) {
-		float rc = 1.0f / (2.0f * PI_F * cutoffHz);
-		float dt = 1.0f / SAMPLE_RATE;
-		float alpha = rc / (rc + dt);
-		for (int i = 0; i < samples; i++) {
-			float in = (float)buf[i];
-			st.z = alpha * (st.z + in - st.prevIn);
-			st.prevIn = in;
-			buf[i] = (int16_t)ClampSample(st.z);
-		}
-	}
-
-	// Band-pass = high-pass then low-pass in series. Emulates the narrow
-	// frequency window of a radio/telephone speaker.
-	void BandPass(int16_t* buf, int samples, HighPassState& hp, OnePoleState& lp, float loHz, float hiHz) {
-		HighPass(buf, samples, hp, loHz);
-		LowPass(buf, samples, lp, hiHz);
-	}
-
-	// Ring modulation: multiplies the signal by a low-frequency carrier tone.
-	// This is the classic "robotic radio soldier" texture (Combine, Cylons,
-	// Daleks, etc all lean on the same trick) - a generic, decades-old DSP
-	// technique, not anything specific to any one voice-changer product.
+	// Ring modulation: multiplies by a low-frequency carrier tone. This is the
+	// classic robotic-radio texture; Combine's reference has a real ~94Hz
+	// amplitude modulation, measured from Null's fx file.
 	void RingModulate(int16_t* buf, int samples, RingModState& st, float carrierHz, float depth) {
 		double phaseInc = 2.0 * (double)PI_F * carrierHz / SAMPLE_RATE;
 		for (int i = 0; i < samples; i++) {
@@ -150,85 +113,16 @@ namespace AudioEffects {
 		}
 	}
 
-	// Adds white noise (static/hiss), scaled 0..1.
-	void AddNoise(int16_t* buf, int samples, NoiseState& st, float level) {
-		if (level <= 0.0f) return;
+	// Adds white noise of the given amplitude (in int16 units). Applied BEFORE
+	// the FIR so the radio filter band-limits the hiss into the radio band.
+	void AddWhiteNoise(int16_t* buf, int samples, NoiseState& st, float amplitude) {
+		if (amplitude <= 0.0f) return;
 		for (int i = 0; i < samples; i++) {
-			// xorshift32
 			st.rng ^= st.rng << 13;
 			st.rng ^= st.rng >> 17;
 			st.rng ^= st.rng << 5;
-			float noise = ((float)(st.rng % 2001) - 1000.0f) / 1000.0f; // -1..1
-			buf[i] = (int16_t)ClampSample((float)buf[i] + noise * level * 4000.0f);
-		}
-	}
-
-	// Soft saturation/distortion for a gritty, compressed radio tone.
-	void SoftClip(int16_t* buf, int samples, float drive) {
-		if (drive <= 1.0f) return;
-		for (int i = 0; i < samples; i++) {
-			float x = ((float)buf[i] / 32768.0f) * drive;
-			float y = x / (1.0f + std::abs(x));
-			buf[i] = (int16_t)ClampSample(y * 32768.0f);
-		}
-	}
-
-	void Gain(int16_t* buf, int samples, float mult) {
-		if (mult == 1.0f) return;
-		for (int i = 0; i < samples; i++) {
-			buf[i] = (int16_t)ClampSample((float)buf[i] * mult);
-		}
-	}
-
-	static int16_t resonantScratch[10 * 1024];
-
-	// Adds a scaled band-limited copy of the signal back onto itself - a cheap
-	// presence/resonance bump in a chosen frequency window, without needing a
-	// full peaking-biquad implementation.
-	void ResonantBoost(int16_t* buf, int samples, HighPassState& hp, OnePoleState& lp, float loHz, float hiHz, float amount) {
-		if (amount <= 0.0f) return;
-		std::memcpy(resonantScratch, buf, samples * sizeof(int16_t));
-		HighPass(resonantScratch, samples, hp, loHz);
-		LowPass(resonantScratch, samples, lp, hiHz);
-		for (int i = 0; i < samples; i++) {
-			buf[i] = (int16_t)ClampSample((float)buf[i] + (float)resonantScratch[i] * amount);
-		}
-	}
-
-	inline float HannWindow01(float t) {
-		return 0.5f - 0.5f * cosf(2.0f * PI_F * t);
-	}
-
-	inline int16_t ReadInterp(const int16_t* ring, int bufSize, float pos) {
-		int i0 = (int)pos;
-		int i1 = (i0 + 1) & (bufSize - 1);
-		i0 &= (bufSize - 1);
-		float frac = pos - floorf(pos);
-		return (int16_t)(ring[i0] * (1.0f - frac) + ring[i1] * frac);
-	}
-
-	// Pitch shift via a two-head overlap-add granular resampler. ratio > 1
-	// raises pitch, ratio < 1 lowers it. Latency/grain size is fixed by
-	// PitchShiftState::BUF_SIZE (~43ms at 24kHz).
-	void PitchShift(int16_t* buf, int samples, PitchShiftState& st, float ratio) {
-		constexpr int BUF_SIZE = PitchShiftState::BUF_SIZE;
-		for (int i = 0; i < samples; i++) {
-			st.ring[st.writePos] = buf[i];
-
-			float w1 = HannWindow01(st.readPos1 / (float)BUF_SIZE);
-			float w2 = HannWindow01(st.readPos2 / (float)BUF_SIZE);
-
-			float s1 = (float)ReadInterp(st.ring, BUF_SIZE, st.readPos1);
-			float s2 = (float)ReadInterp(st.ring, BUF_SIZE, st.readPos2);
-
-			buf[i] = (int16_t)ClampSample(s1 * w1 + s2 * w2);
-
-			st.writePos = (st.writePos + 1) & (BUF_SIZE - 1);
-
-			st.readPos1 += ratio;
-			if (st.readPos1 >= BUF_SIZE) st.readPos1 -= BUF_SIZE;
-			st.readPos2 += ratio;
-			if (st.readPos2 >= BUF_SIZE) st.readPos2 -= BUF_SIZE;
+			float n = ((float)(st.rng & 0xFFFF) / 32768.0f) - 1.0f; // -1..1
+			buf[i] = (int16_t)ClampSample((float)buf[i] + n * amplitude);
 		}
 	}
 }
