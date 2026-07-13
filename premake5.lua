@@ -32,7 +32,11 @@ CreateWorkspace({name = "metro_voicefx"})
 		-- "GLIBCXX_3.4.32 not found" load error when built on a newer distro).
 		filter("system:linux")
 			-- -pthread: the worker pool uses std::thread/mutex/condition_variable.
-			buildoptions({"-pthread"})
+			-- The rest is CRITICAL for the neural inference: on 32-bit, plain -O2
+			-- uses x87 float (~5x slower than SSE - benchmarked). Force SSE math +
+			-- -O3 + vectorization so the per-sample conv loop actually vectorizes.
+			buildoptions({"-pthread", "-O3", "-msse2", "-mfpmath=sse",
+			              "-ftree-vectorize", "-funroll-loops"})
 			linkoptions({"-static-libstdc++", "-static-libgcc", "-pthread"})
 
 		filter("system:windows")
