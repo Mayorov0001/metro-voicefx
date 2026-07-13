@@ -74,6 +74,7 @@ namespace VoiceWorkers {
 		std::unique_ptr<MetroTCN::TCNState> tcn;              // neural presets (~800KB, lazy)
 		uint32_t             wkEpoch  = 0;
 		int                  dspHold  = 0;                    // >0: forced onto DSP (overload)
+		float                agcMs    = 0.0f;                 // running mean-square for input AGC
 
 		// finished packets waiting for the main thread to broadcast:
 		std::mutex           outMtx;
@@ -143,6 +144,7 @@ namespace VoiceWorkers {
 		if (ep != ch->wkEpoch) {                 // effect switched -> reset per-player state
 			ch->fx = AudioEffects::PlayerFXState();
 			if (ch->tcn) ch->tcn->init = false;  // force TCN re-init for the new preset
+			ch->agcMs = 0.0f;
 			ch->wkEpoch = ep;
 		}
 		// Load-based graceful degradation: if this worker is behind, run the cheap
@@ -172,6 +174,23 @@ namespace VoiceWorkers {
 				const MetroTCN::Model* nm = useDsp ? nullptr : MetroTCN::Get(eff);
 				if (nm) {
 					if (!ch->tcn) ch->tcn.reset(new MetroTCN::TCNState());
+					// AGC: normalize the mic level to the level the net was TRAINED on,
+					// so the effect is identical for every player regardless of mic gain.
+					// Without this the nonlinear net lands in a different regime per level
+					// and the effect sounds completely different in-game vs the reference.
+					{
+						int16_t* pcm = (int16_t*)decomp;
+						const float a = expf(-1.0f / (24000.0f * 0.25f));   // ~250ms one-pole
+						const float t2 = nm->refRms * nm->refRms;
+						if (ch->agcMs <= 0.0f) ch->agcMs = t2;
+						for (int i = 0; i < samples; i++) {
+							float s = (float)pcm[i] / 32768.0f;
+							ch->agcMs = a * ch->agcMs + (1.0f - a) * s * s;
+							float g = sqrtf(t2 / (ch->agcMs + 1e-7f));
+							if (g < 0.1f) g = 0.1f; else if (g > 15.0f) g = 15.0f;
+							pcm[i] = (int16_t)AudioEffects::ClampSample(s * g * 32768.0f);
+						}
+					}
 					MetroTCN::Process((int16_t*)decomp, samples, *ch->tcn, nm);
 				} else {
 					samples = ApplyEffect(eff, decomp, samples, ch->fx);
