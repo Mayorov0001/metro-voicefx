@@ -8,8 +8,6 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
-#include <memory>
-#include "tcn_state.h"
 
 namespace AudioEffects {
 	enum {
@@ -72,7 +70,11 @@ namespace AudioEffects {
 		int pos = 0;
 	};
 
-	// Feedback delay line for PA's slap-back echo (max 100ms+ at 24kHz).
+	struct CompState {
+		float env = 0.0f;
+	};
+
+	// Feedback delay line for PA's slap-back echo (max ~106ms at 24kHz).
 	struct EchoState {
 		static const int MAXDELAY = 2560;
 		float buf[MAXDELAY] = { 0 };
@@ -81,12 +83,10 @@ namespace AudioEffects {
 
 	struct PlayerFXState {
 		FIRState fir;
+		CompState comp;
 		EchoState echo;
 		RingModState ring;
 		NoiseState noise;
-		// Heap-allocated only when a neural preset is used (its ~800KB history
-		// must not live on the stack, and linear presets don't need it). Move-only.
-		std::unique_ptr<MetroTCN::TCNState> tcn;
 	};
 
 	// ---- building blocks ----
@@ -95,21 +95,6 @@ namespace AudioEffects {
 		if (v < -32768.0f) return -32768.0f;
 		if (v > 32767.0f) return 32767.0f;
 		return v;
-	}
-
-	// Feedback echo (PA slap-back). y[n] = x[n] + fb*y[n-delay]; state persists
-	// across packets so the echo tail carries over.
-	void FeedbackEcho(int16_t* buf, int samples, EchoState& st, float delayMs, float fb) {
-		int d = (int)(delayMs * 24.0f);   // ms * (24000/1000)
-		if (d < 1) d = 1;
-		if (d >= EchoState::MAXDELAY) d = EchoState::MAXDELAY - 1;
-		for (int i = 0; i < samples; i++) {
-			int rp = st.pos - d; if (rp < 0) rp += EchoState::MAXDELAY;
-			float y = ClampSample((float)buf[i] + fb * st.buf[rp]);
-			st.buf[st.pos] = y;
-			buf[i] = (int16_t)y;
-			st.pos++; if (st.pos >= EchoState::MAXDELAY) st.pos = 0;
-		}
 	}
 
 	// Streaming FIR convolution with the measured per-preset coefficients.
@@ -151,6 +136,51 @@ namespace AudioEffects {
 			st.rng ^= st.rng << 5;
 			float n = ((float)(st.rng & 0xFFFF) / 32768.0f) - 1.0f; // -1..1
 			buf[i] = (int16_t)ClampSample((float)buf[i] + n * amplitude);
+		}
+	}
+
+	// Soft saturation (tanh drive), matches export_cpp.py sat().
+	void Saturate(int16_t* buf, int samples, float drive) {
+		if (drive <= 1.0f) return;
+		float td = tanhf(drive);
+		for (int i = 0; i < samples; i++) {
+			float x = (float)buf[i] / 32768.0f * drive;
+			buf[i] = (int16_t)ClampSample(tanhf(x) / td * 32768.0f);
+		}
+	}
+
+	// One-pole feed-forward compressor (matches export_cpp.py compress()): fast
+	// attack, release set by rel_ms. Env persists across packets.
+	void Compress(int16_t* buf, int samples, CompState& st, float thr_db, float ratio, float rel_ms) {
+		if (ratio <= 1.01f) return;
+		float a = expf(-1.0f / (SAMPLE_RATE * rel_ms / 1000.0f));
+		float thr = powf(10.0f, thr_db / 20.0f);
+		for (int i = 0; i < samples; i++) {
+			float xn = (float)buf[i] / 32768.0f;
+			float v = fabsf(xn);
+			st.env = (v < st.env) ? (a * st.env + (1.0f - a) * v) : (0.2f * st.env + 0.8f * v);
+			float g = (st.env < thr) ? 1.0f : powf(thr / (st.env + 1e-9f), 1.0f - 1.0f / ratio);
+			buf[i] = (int16_t)ClampSample(xn * g * 32768.0f);
+		}
+	}
+
+	void Gain(int16_t* buf, int samples, float mult) {
+		if (mult == 1.0f) return;
+		for (int i = 0; i < samples; i++)
+			buf[i] = (int16_t)ClampSample((float)buf[i] * mult);
+	}
+
+	// PA slap-back feedback echo. y[n] = x[n] + fb*y[n-delay]; tail carries across packets.
+	void FeedbackEcho(int16_t* buf, int samples, EchoState& st, float delayMs, float fb) {
+		int d = (int)(delayMs * 24.0f);   // ms * (24000/1000)
+		if (d < 1) d = 1;
+		if (d >= EchoState::MAXDELAY) d = EchoState::MAXDELAY - 1;
+		for (int i = 0; i < samples; i++) {
+			int rp = st.pos - d; if (rp < 0) rp += EchoState::MAXDELAY;
+			float y = ClampSample((float)buf[i] + fb * st.buf[rp]);
+			st.buf[st.pos] = y;
+			buf[i] = (int16_t)y;
+			st.pos++; if (st.pos >= EchoState::MAXDELAY) st.pos = 0;
 		}
 	}
 }
