@@ -37,6 +37,7 @@
 #include "steam_voice.h"
 #include "audio_effects.h"
 #include "voice_presets.h"
+#include "tcn_infer.h"       // neural presets (Radio/Phone/Stormtrooper/Combine)
 #include "opus_framedecoder.h"
 #include "eightbit_state.h"
 
@@ -63,7 +64,8 @@ namespace VoiceWorkers {
 
 		// worker-only:
 		IVoiceCodec*         codec    = nullptr;
-		AudioEffects::PlayerFXState fx;
+		AudioEffects::PlayerFXState fx;                       // DSP presets (PA/Muffled/Masked)
+		std::unique_ptr<MetroTCN::TCNState> tcn;              // neural presets (~800KB, lazy)
 		uint32_t             wkEpoch  = 0;
 
 		// finished packets waiting for the main thread to broadcast:
@@ -131,8 +133,9 @@ namespace VoiceWorkers {
 		std::shared_ptr<Channel> ch = job.ch;
 		int      eff = ch->effect.load(std::memory_order_relaxed);
 		uint32_t ep  = ch->epoch.load(std::memory_order_relaxed);
-		if (ep != ch->wkEpoch) {                 // effect switched -> reset per-player DSP state
+		if (ep != ch->wkEpoch) {                 // effect switched -> reset per-player state
 			ch->fx = AudioEffects::PlayerFXState();
+			if (ch->tcn) ch->tcn->init = false;  // force TCN re-init for the new preset
 			ch->wkEpoch = ep;
 		}
 		if (!ch->codec) {
@@ -149,7 +152,17 @@ namespace VoiceWorkers {
 				ch->codec, job.pkt.data, job.pkt.nBytes, decomp, SCRATCH);
 			int samples = bytesDecompressed / 2;
 			if (bytesDecompressed > 0) {
-				samples = ApplyEffect(eff, decomp, samples, ch->fx);
+				// Neural presets (Radio/Phone/Stormtrooper/Combine) run through the
+				// TCN; everything else (PA/Muffled/Masked + legacy) stays cheap DSP.
+				// If a neural model is somehow missing, Get() returns null and we
+				// fall back to the DSP path for that preset.
+				const MetroTCN::Model* nm = MetroTCN::Get(eff);
+				if (nm) {
+					if (!ch->tcn) ch->tcn.reset(new MetroTCN::TCNState());
+					MetroTCN::Process((int16_t*)decomp, samples, *ch->tcn, nm);
+				} else {
+					samples = ApplyEffect(eff, decomp, samples, ch->fx);
+				}
 				uint64_t steamid = *(uint64_t*)job.pkt.data;
 				int bytesWritten = SteamVoice::CompressIntoBuffer(
 					steamid, ch->codec, decomp, samples * 2, recomp, SCRATCH, 24000);
