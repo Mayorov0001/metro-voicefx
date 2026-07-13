@@ -10,17 +10,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
-    - name: TCN inference benchmark (ubuntu:20.04, 32-bit, module-matching)
+    - name: TCN inference benchmark (native, 32-bit)
       run: |
-        docker run --rm -v "$PWD":/src -w /src ubuntu:20.04 bash -c '
-          set -e
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y g++-multilib > /dev/null
-          echo "--- CPU ---"; grep -m1 "model name" /proc/cpuinfo; nproc
-          echo "--- g++ ---"; g++ --version | head -1
-          for OPT in "-O2" "-O2 -msse2 -mfpmath=sse" "-O3 -msse2 -mfpmath=sse -ftree-vectorize -funroll-loops"; do
-            echo ""; echo "############ flags: $OPT ############"
-            g++ -m32 $OPT -std=c++17 -Isource bench/bench_tcn.cpp -o bench_tcn
-            ./bench_tcn
-          done
-        '
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y g++-multilib > /dev/null
+        echo "--- CPU ---"; grep -m1 'model name' /proc/cpuinfo; echo "cores: $(nproc)"
+        echo "--- g++ ---"; g++ --version | head -1
+        for OPT in "-O2" "-O2 -msse2 -mfpmath=sse" "-O3 -msse2 -mfpmath=sse -ftree-vectorize -funroll-loops"; do
+          echo ""; echo "############ flags: $OPT ############"
+          g++ -m32 $OPT -std=c++17 -Isource bench/bench_tcn.cpp -o bench_tcn
+          ./bench_tcn
+        done
