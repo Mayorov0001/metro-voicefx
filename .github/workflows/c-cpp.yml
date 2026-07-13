@@ -2,15 +2,15 @@ name: Build
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, main ]
   workflow_dispatch:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
       with:
         submodules: recursive
         repository: danielga/garrysmod_common
@@ -42,10 +42,10 @@ jobs:
         name: gmsv_metro_voicefx_linux64.dll
         path: projects/linux/gmake/x86_64/ReleaseWithSymbols/gmsv_metro_voicefx_linux64.dll
   build-windows:
-    runs-on: windows-2019
+    runs-on: windows-2022
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
       with:
         submodules: recursive
         repository: danielga/garrysmod_common
