@@ -52,6 +52,8 @@ namespace VoiceWorkers {
 	                                          // drop packets (choppy voice) instead of growing
 	                                          // memory/latency without bound. The main thread
 	                                          // (game tick) is never affected either way.
+	static const int  NEURAL_BACKLOG_LIMIT = 3;  // worker this far behind -> fall back to DSP
+	static const int  DSP_HOLD_PACKETS = 50;     // ...and stay on DSP ~1s (hysteresis, no flip)
 	static const int  STEAM_MIN_PKT = (int)(sizeof(uint64_t) + sizeof(uint32_t)); // steamid + crc
 
 	struct Packet {
@@ -71,6 +73,7 @@ namespace VoiceWorkers {
 		AudioEffects::PlayerFXState fx;                       // DSP presets (PA/Muffled/Masked)
 		std::unique_ptr<MetroTCN::TCNState> tcn;              // neural presets (~800KB, lazy)
 		uint32_t             wkEpoch  = 0;
+		int                  dspHold  = 0;                    // >0: forced onto DSP (overload)
 
 		// finished packets waiting for the main thread to broadcast:
 		std::mutex           outMtx;
@@ -133,7 +136,7 @@ namespace VoiceWorkers {
 		return samples;
 	}
 
-	inline void ProcessJob(Job& job, char* decomp, char* recomp) {
+	inline void ProcessJob(Job& job, char* decomp, char* recomp, int backlog) {
 		std::shared_ptr<Channel> ch = job.ch;
 		int      eff = ch->effect.load(std::memory_order_relaxed);
 		uint32_t ep  = ch->epoch.load(std::memory_order_relaxed);
@@ -142,6 +145,12 @@ namespace VoiceWorkers {
 			if (ch->tcn) ch->tcn->init = false;  // force TCN re-init for the new preset
 			ch->wkEpoch = ep;
 		}
+		// Load-based graceful degradation: if this worker is behind, run the cheap
+		// DSP path (~100x lighter than the TCN) so it catches up instead of dropping
+		// packets. Hysteresis keeps the talker on DSP ~1s to avoid per-packet flip.
+		if (backlog > NEURAL_BACKLOG_LIMIT) ch->dspHold = DSP_HOLD_PACKETS;
+		bool useDsp = ch->dspHold > 0;
+		if (ch->dspHold > 0) ch->dspHold--;
 		if (!ch->codec) {
 			ch->codec = new SteamOpus::Opus_FrameDecoder();
 			ch->codec->Init(5, 24000);
@@ -160,7 +169,7 @@ namespace VoiceWorkers {
 				// TCN; everything else (PA/Muffled/Masked + legacy) stays cheap DSP.
 				// If a neural model is somehow missing, Get() returns null and we
 				// fall back to the DSP path for that preset.
-				const MetroTCN::Model* nm = MetroTCN::Get(eff);
+				const MetroTCN::Model* nm = useDsp ? nullptr : MetroTCN::Get(eff);
 				if (nm) {
 					if (!ch->tcn) ch->tcn.reset(new MetroTCN::TCNState());
 					MetroTCN::Process((int16_t*)decomp, samples, *ch->tcn, nm);
@@ -191,14 +200,16 @@ namespace VoiceWorkers {
 		std::vector<char> decomp(SCRATCH), recomp(SCRATCH);
 		for (;;) {
 			Job job;
+			int backlog;
 			{
 				std::unique_lock<std::mutex> lk(wk->mtx);
 				wk->cv.wait(lk, [&] { return wk->stop || !wk->jobs.empty(); });
 				if (wk->stop && wk->jobs.empty()) break;
 				job = std::move(wk->jobs.front());
 				wk->jobs.pop();
+				backlog = (int)wk->jobs.size();   // how far behind we are right now
 			}
-			ProcessJob(job, decomp.data(), recomp.data());
+			ProcessJob(job, decomp.data(), recomp.data(), backlog);
 		}
 	}
 
