@@ -4,10 +4,10 @@
 #include <cstdint>
 
 namespace MetroTCN {
-	constexpr int MAXCH = 48;
+	constexpr int MAXCH = 64;      // Radio/Phone/Storm are 48ch; Combine/Masked 64ch
 	constexpr int MAXLAYERS = 11;
-	// Sum over layers of (2*2^i + 1)*MAXCH for i=0..MAXLAYERS-1 == 197040; round up.
-	constexpr int HIST_MAX = 200000;
+	// Sum over layers of (2*2^i + 1)*MAXCH for i=0..MAXLAYERS-1 == 4105*64 = 262720; round up.
+	constexpr int HIST_MAX = 270000;
 
 	// Input-generation constants (MUST match make_inputs in neural_hq.py).
 	constexpr float CARRIER_HZ = 100.0f;
