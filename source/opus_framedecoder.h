@@ -39,7 +39,16 @@ namespace SteamOpus {
             int error = 0;
 
             dec = opus_decoder_create(SAMPLERATE_GMOD_OPUS, 1, &error);
-            enc = opus_encoder_create(SAMPLERATE_GMOD_OPUS, 1, OPUS_APPLICATION_VOIP, &error);
+            // AUDIO (not VOIP): VOIP mode runs SILK speech-processing + noise
+            // suppression that scrubs the effect's texture (radio static/crackle,
+            // the 'electric' grit). AUDIO keeps CELT so the texture survives the
+            // re-encode. + higher bitrate/complexity, music hint, no DTX so the
+            // continuous hiss isn't gated out. Only affects effect voices.
+            enc = opus_encoder_create(SAMPLERATE_GMOD_OPUS, 1, OPUS_APPLICATION_AUDIO, &error);
+            opus_encoder_ctl(enc, OPUS_SET_BITRATE(48000));
+            opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(10));
+            opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+            opus_encoder_ctl(enc, OPUS_SET_DTX(0));
         }
 
         virtual bool Init(int quality, int sampleRate) {
