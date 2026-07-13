@@ -39,7 +39,8 @@ namespace AudioEffects {
 		}
 	}
 
-	static uint16_t tempBuf[10 * 1024];
+	// thread_local: workers may run Desample concurrently for different players.
+	static thread_local uint16_t tempBuf[10 * 1024];
 	void Desample(uint16_t* inBuffer, int& samples, int desampleRate = 2) {
 		assert(samples / desampleRate + 1 <= sizeof(tempBuf));
 		int outIdx = 0;

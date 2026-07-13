@@ -20,6 +20,7 @@
 #include <GarrysMod/Symbol.hpp>
 #include <cstdint>
 #include "opus_framedecoder.h"
+#include "voice_worker.h"
 
 #define STEAM_PCKT_SZ sizeof(uint64_t) + sizeof(CRC32_t)
 #ifdef SYSTEM_WINDOWS
@@ -44,8 +45,9 @@
 	};
 #endif
 
+// Scratch for the optional external raw-packet mirror (main thread only). The
+// effect path's decode/encode scratch lives per-worker in voice_worker.h.
 static char decompressedBuffer[20 * 1024];
-static char recompressBuffer[20 * 1024];
 
 Net* net_handl = nullptr;
 EightbitState* g_eightbit = nullptr;
@@ -65,7 +67,6 @@ void hook_BroadcastVoiceData(IClient* cl, uint nBytes, char* data, int64 xuid) {
 	}
 #endif
 
-	auto& afflicted_players = g_eightbit->afflictedPlayers;
 	if (g_eightbit->broadcastPackets && nBytes > sizeof(uint64_t)) {
 		//Get the user's steamid64, put it at the beginning of the buffer.
 		//Notice that we don't use the conveniently provided one in the voice packet. The client can manipulate that one.
@@ -87,65 +88,19 @@ void hook_BroadcastVoiceData(IClient* cl, uint nBytes, char* data, int64 xuid) {
  		net_handl->SendPacket(g_eightbit->ip.c_str(), g_eightbit->port, decompressedBuffer, nBytes);
 	}
 
-	if (afflicted_players.find(uid) != afflicted_players.end()) {
-		auto& playerData = afflicted_players.at(uid);
-		IVoiceCodec* codec = std::get<0>(playerData);
-
-		if(nBytes < STEAM_PCKT_SZ) {
-			return detour_BroadcastVoiceData.GetTrampoline<SV_BroadcastVoiceData>()(cl, nBytes, data, xuid);
-		}
-
-		int bytesDecompressed = SteamVoice::DecompressIntoBuffer(codec, data, nBytes, decompressedBuffer, sizeof(decompressedBuffer));
-		int samples = bytesDecompressed / 2;
-		if (bytesDecompressed <= 0) {
-			//Just hit the trampoline at this point.
-			return detour_BroadcastVoiceData.GetTrampoline<SV_BroadcastVoiceData>()(cl, nBytes, data, xuid);
-		}
-
-		#ifdef _DEBUG
-			std::cout << "Decompressed samples " << samples << std::endl;
-		#endif
-
-		//Apply audio effect
-		int eff = std::get<1>(playerData);
-		AudioEffects::PlayerFXState& fxState = std::get<2>(playerData);
-		switch (eff) {
-		case AudioEffects::EFF_BITCRUSH:
-			AudioEffects::BitCrush((uint16_t*)&decompressedBuffer, samples, g_eightbit->crushFactor, g_eightbit->gainFactor);
-			break;
-		case AudioEffects::EFF_DESAMPLE:
-			AudioEffects::Desample((uint16_t*)&decompressedBuffer, samples, g_eightbit->desampleRate);
-			break;
-		case AudioEffects::EFF_RADIO:
-		case AudioEffects::EFF_PHONE:
-		case AudioEffects::EFF_STORMTROOPER:
-		case AudioEffects::EFF_COMBINE:
-		case AudioEffects::EFF_PA:
-		case AudioEffects::EFF_MUFFLED:
-		case AudioEffects::EFF_MASKED:
-			VoicePresets::Apply(eff, (int16_t*)&decompressedBuffer, samples, fxState);
-			break;
-		default:
-			break;
-		}
-
-		//Recompress the stream
-		uint64_t steamid = *(uint64_t*)data;
-		int bytesWritten = SteamVoice::CompressIntoBuffer(steamid, codec, decompressedBuffer, samples*2, recompressBuffer, sizeof(recompressBuffer), 24000);
-		if (bytesWritten <= 0) {
-			return detour_BroadcastVoiceData.GetTrampoline<SV_BroadcastVoiceData>()(cl, nBytes, data, xuid);
-		}
-
-		#ifdef _DEBUG
-			std::cout << "Retransmitted pckt size: " << bytesWritten << std::endl;
-		#endif
-
-		//Broadcast voice data with our updated compressed data.
-		return detour_BroadcastVoiceData.GetTrampoline<SV_BroadcastVoiceData>()(cl, bytesWritten, recompressBuffer, xuid);
+	// Effect path: hand the packet to the worker pool (Opus decode/encode + DSP
+	// or neural all run off the main thread) and broadcast any already-finished
+	// packets for this speaker NOW, while cl is valid - pipelined by ~1 packet.
+	// No effect assigned -> straight through, zero added cost.
+	if (VoiceWorkers::HasChannel(uid)) {
+		VoiceWorkers::Submit(uid, data, (int)nBytes, xuid);
+		auto trampoline = detour_BroadcastVoiceData.GetTrampoline<SV_BroadcastVoiceData>();
+		VoiceWorkers::DrainOutputs(uid, [&](const char* d, int n, int64_t x) {
+			trampoline(cl, n, const_cast<char*>(d), x);
+		});
+		return;
 	}
-	else {
-		return detour_BroadcastVoiceData.GetTrampoline<SV_BroadcastVoiceData>()(cl, nBytes, data, xuid);
-	}
+	return detour_BroadcastVoiceData.GetTrampoline<SV_BroadcastVoiceData>()(cl, nBytes, data, xuid);
 }
 
 LUA_FUNCTION_STATIC(eightbit_crush) {
@@ -186,30 +141,9 @@ LUA_FUNCTION_STATIC(eightbit_setdesamplerate) {
 LUA_FUNCTION_STATIC(eightbit_enableEffect) {
 	int id = LUA->GetNumber(1);
 	int eff = LUA->GetNumber(2);
-
-	auto& afflicted_players = g_eightbit->afflictedPlayers;
-	if (afflicted_players.find(id) != afflicted_players.end()) {
-		if (eff == AudioEffects::EFF_NONE) {
-			IVoiceCodec* codec = std::get<0>(afflicted_players.at(id));
-			delete codec;
-			afflicted_players.erase(id);
-		}
-		else {
-			auto& playerData = afflicted_players.at(id);
-			std::get<1>(playerData) = eff;
-			// Reset filter/oscillator/pitch state so switching presets doesn't
-			// carry over stale history from the previous effect.
-			std::get<2>(playerData) = AudioEffects::PlayerFXState();
-		}
-		return 0;
-	}
-	else if(eff != AudioEffects::EFF_NONE) {
-
-		IVoiceCodec* codec = new SteamOpus::Opus_FrameDecoder();
-		codec->Init(5, 24000);
-		afflicted_players.insert(std::pair<int, std::tuple<IVoiceCodec*, int, AudioEffects::PlayerFXState>>(
-			id, std::tuple<IVoiceCodec*, int, AudioEffects::PlayerFXState>(codec, eff, AudioEffects::PlayerFXState())));
-	}
+	// Create/switch/remove the player's worker channel. EFF_NONE removes them
+	// (zero cost thereafter). The worker owns the codec + DSP state.
+	VoiceWorkers::SetEffect(id, eff);
 	return 0;
 }
 
@@ -317,6 +251,14 @@ GMOD_MODULE_OPEN()
 
 	net_handl = new Net();
 
+	// Spin up the worker pool that does all Opus decode/encode + DSP/neural off
+	// the main thread. Leave a couple of cores for the game tick / other work.
+	unsigned int hc = std::thread::hardware_concurrency();
+	int workers = (int)hc - 2;
+	if (workers < 1) workers = 1;
+	if (workers > 8) workers = 8;
+	VoiceWorkers::Init(workers);
+
 #ifdef THIRDPARTY_LINK
 	linkMutedFunc();
 #endif
@@ -326,15 +268,11 @@ GMOD_MODULE_OPEN()
 
 GMOD_MODULE_CLOSE()
 {
+	// Stop the hook first so no new packets are enqueued, then join the workers
+	// (they own and free the per-player codecs/state via the Channel destructor).
 	detour_BroadcastVoiceData.Disable();
 	detour_BroadcastVoiceData.Destroy();
-
-	for (auto& p : g_eightbit->afflictedPlayers) {
-		IVoiceCodec* codec = std::get<0>(p.second);
-		if (codec != nullptr) {
-			delete codec;
-		}
-	}
+	VoiceWorkers::Shutdown();
 
 	delete net_handl;
 	delete g_eightbit;

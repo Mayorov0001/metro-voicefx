@@ -31,7 +31,9 @@ CreateWorkspace({name = "metro_voicefx"})
 		-- server container's libstdc++/libgcc version (fixes the
 		-- "GLIBCXX_3.4.32 not found" load error when built on a newer distro).
 		filter("system:linux")
-			linkoptions({"-static-libstdc++", "-static-libgcc"})
+			-- -pthread: the worker pool uses std::thread/mutex/condition_variable.
+			buildoptions({"-pthread"})
+			linkoptions({"-static-libstdc++", "-static-libgcc", "-pthread"})
 
 		filter("system:windows")
 			links("ws2_32")
