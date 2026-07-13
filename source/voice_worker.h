@@ -48,6 +48,10 @@ namespace VoiceWorkers {
 	static const int  MAXPKT        = 4096;   // a compressed steam voice packet is well under this
 	static const int  SCRATCH       = 20 * 1024;
 	static const int  MAX_OUT_QUEUE = 8;      // bound added latency; drop oldest past this
+	static const int  MAX_JOB_QUEUE = 64;     // per-worker backlog cap: under overload we
+	                                          // drop packets (choppy voice) instead of growing
+	                                          // memory/latency without bound. The main thread
+	                                          // (game tick) is never affected either way.
 	static const int  STEAM_MIN_PKT = (int)(sizeof(uint64_t) + sizeof(uint32_t)); // steamid + crc
 
 	struct Packet {
@@ -263,7 +267,11 @@ namespace VoiceWorkers {
 		job.pkt.xuid = xuid;
 		std::memcpy(job.pkt.data, data, nBytes);
 		Worker* wk = Pool()[WorkerFor(userid)].get();
-		{ std::lock_guard<std::mutex> lk(wk->mtx); wk->jobs.push(std::move(job)); }
+		{
+			std::lock_guard<std::mutex> lk(wk->mtx);
+			if ((int)wk->jobs.size() >= MAX_JOB_QUEUE) wk->jobs.pop();  // overload: drop oldest
+			wk->jobs.push(std::move(job));
+		}
 		wk->cv.notify_one();
 	}
 

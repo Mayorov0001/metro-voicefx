@@ -252,9 +252,11 @@ GMOD_MODULE_OPEN()
 	net_handl = new Net();
 
 	// Spin up the worker pool that does all Opus decode/encode + DSP/neural off
-	// the main thread. Leave a couple of cores for the game tick / other work.
+	// the main thread. Reserve one core for the (single-threaded) game tick;
+	// workers idle-block when nobody is talking, so this doesn't steal CPU at
+	// rest. Capped at 8 so huge boxes don't spawn a silly number of threads.
 	unsigned int hc = std::thread::hardware_concurrency();
-	int workers = (int)hc - 2;
+	int workers = (int)hc - 1;
 	if (workers < 1) workers = 1;
 	if (workers > 8) workers = 8;
 	VoiceWorkers::Init(workers);
