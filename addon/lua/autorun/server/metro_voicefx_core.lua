@@ -2,6 +2,9 @@
 -- and decides which preset applies to which player. Edit metro_voicefx_config.lua,
 -- not this file, to configure rules.
 
+-- Load the native binary module (gmsv_metro_voicefx_<platform>.dll in lua/bin).
+pcall(require, "metro_voicefx")
+
 if not metrovoice then
 	ErrorNoHalt("[MetroVoiceFX] Native module 'metrovoice' isn't loaded - voice effects are disabled.\n")
 	ErrorNoHalt("[MetroVoiceFX] Make sure gmsv_metro_voicefx_<platform>.dll is in garrysmod/lua/bin/ and restart.\n")
