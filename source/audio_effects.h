@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <memory>
+#include "tcn_state.h"
 
 namespace AudioEffects {
 	enum {
@@ -70,10 +72,21 @@ namespace AudioEffects {
 		int pos = 0;
 	};
 
+	// Feedback delay line for PA's slap-back echo (max 100ms+ at 24kHz).
+	struct EchoState {
+		static const int MAXDELAY = 2560;
+		float buf[MAXDELAY] = { 0 };
+		int pos = 0;
+	};
+
 	struct PlayerFXState {
 		FIRState fir;
+		EchoState echo;
 		RingModState ring;
 		NoiseState noise;
+		// Heap-allocated only when a neural preset is used (its ~800KB history
+		// must not live on the stack, and linear presets don't need it). Move-only.
+		std::unique_ptr<MetroTCN::TCNState> tcn;
 	};
 
 	// ---- building blocks ----
@@ -82,6 +95,21 @@ namespace AudioEffects {
 		if (v < -32768.0f) return -32768.0f;
 		if (v > 32767.0f) return 32767.0f;
 		return v;
+	}
+
+	// Feedback echo (PA slap-back). y[n] = x[n] + fb*y[n-delay]; state persists
+	// across packets so the echo tail carries over.
+	void FeedbackEcho(int16_t* buf, int samples, EchoState& st, float delayMs, float fb) {
+		int d = (int)(delayMs * 24.0f);   // ms * (24000/1000)
+		if (d < 1) d = 1;
+		if (d >= EchoState::MAXDELAY) d = EchoState::MAXDELAY - 1;
+		for (int i = 0; i < samples; i++) {
+			int rp = st.pos - d; if (rp < 0) rp += EchoState::MAXDELAY;
+			float y = ClampSample((float)buf[i] + fb * st.buf[rp]);
+			st.buf[st.pos] = y;
+			buf[i] = (int16_t)y;
+			st.pos++; if (st.pos >= EchoState::MAXDELAY) st.pos = 0;
+		}
 	}
 
 	// Streaming FIR convolution with the measured per-preset coefficients.

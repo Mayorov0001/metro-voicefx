@@ -2,34 +2,33 @@
 #include <cstdint>
 #include "audio_effects.h"
 #include "metro_fir_data.h"
+#include "tcn_infer.h"
 
-// Named voice FX presets for the Metro 2033 RP server. Each preset is driven
-// by a FIR filter measured directly from Null's reference dry/fx pair (system
-// identification - we measured his exact frequency response rather than
-// guessing an effect chain), used with his permission. The only non-EQ stages
-// are a ~94Hz ring modulation on Combine and band-limited hiss on Radio, both
-// of which were also measured from the reference files. See export_cpp.py for
-// how metro_fir_data.h is generated.
+// Dispatches each Metro 2033 RP voice preset to its engine:
+//  - Neural presets (Radio, Phone, Stormtrooper, Combine) -> a per-preset TCN
+//    trained on Null's dry/fx pairs (the nonlinear radio/vocoder character a
+//    plain filter can't reach). See tcn_infer.h / metro_tcn_data.h.
+//  - Linear presets (PA, Muffled, Masked) -> the measured min-phase FIR (gain
+//    folded in) plus PA's 100ms feedback echo. See metro_fir_data.h.
 
 namespace VoicePresets {
 	using namespace AudioEffects;
 
 	inline void Apply(int effect, int16_t* buf, int samples, PlayerFXState& st) {
-		const MetroFIR::PresetDesc* d = MetroFIR::Get(effect);
-		if (d == nullptr) return;
-
-		// 1. Radio hiss goes in before the filter so the radio band-pass shapes
-		//    it into authentic in-band static.
-		if (d->noise > 0.0f) {
-			AddWhiteNoise(buf, samples, st.noise, d->noise);
+		// Neural presets first.
+		const MetroTCN::Model* nm = MetroTCN::Get(effect);
+		if (nm != nullptr) {
+			if (!st.tcn) st.tcn.reset(new MetroTCN::TCNState());
+			MetroTCN::Process(buf, samples, *st.tcn, nm);
+			return;
 		}
 
-		// 2. Null's measured EQ curve (makeup gain already folded into the taps).
+		// Linear presets.
+		const MetroFIR::PresetDesc* d = MetroFIR::Get(effect);
+		if (d == nullptr) return;
 		FIRApply(buf, samples, st.fir, d->fir, MetroFIR::NTAPS);
-
-		// 3. Combine's robotic ring-mod buzz.
-		if (d->ringDepth > 0.0f) {
-			RingModulate(buf, samples, st.ring, d->ringFc, d->ringDepth);
+		if (d->echoFb > 0.0f && d->echoMs > 0.0f) {
+			FeedbackEcho(buf, samples, st.echo, d->echoMs, d->echoFb);
 		}
 	}
 }
