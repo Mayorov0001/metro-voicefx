@@ -27,5 +27,11 @@ CreateWorkspace({name = "metro_voicefx"})
 		filter({"platforms:x86"})
 			libdirs {"opus/lib32"}
 
+		-- Bundle the C++ runtime into the module so it doesn't depend on the
+		-- server container's libstdc++/libgcc version (fixes the
+		-- "GLIBCXX_3.4.32 not found" load error when built on a newer distro).
+		filter("system:linux")
+			linkoptions({"-static-libstdc++", "-static-libgcc"})
+
 		filter("system:windows")
 			links("ws2_32")
