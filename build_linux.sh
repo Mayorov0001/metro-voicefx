@@ -15,7 +15,7 @@ sudo apt-get install -y g++-multilib wget git
 
 if ! command -v premake5 >/dev/null 2>&1; then
 	echo "== Installing premake5 =="
-	wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz -O /tmp/premake.tar.gz
+	wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-linux.tar.gz -O /tmp/premake.tar.gz
 	tar -xf /tmp/premake.tar.gz -C /tmp
 	chmod +x /tmp/premake5
 	sudo cp /tmp/premake5 /usr/bin/premake5
