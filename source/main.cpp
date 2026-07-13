@@ -19,6 +19,9 @@
 #include "eightbit_state.h"
 #include <GarrysMod/Symbol.hpp>
 #include <cstdint>
+#include <cstdio>
+#include <chrono>
+#include <memory>
 #include "opus_framedecoder.h"
 #include "voice_worker.h"
 
@@ -147,6 +150,51 @@ LUA_FUNCTION_STATIC(eightbit_enableEffect) {
 	return 0;
 }
 
+// CPU self-test: run the REAL processing chain for each preset on this server's
+// CPU and report the realtime factor (streams one core sustains) + the estimated
+// concurrent-talker capacity across the worker pool. Blocks the main thread for
+// ~1-2s while it runs, so use it when the server isn't full.
+// Call from server console:  lua_run metrovoice.Bench(0.5)
+LUA_FUNCTION_STATIC(eightbit_bench) {
+	double secs = LUA->GetNumber(1);
+	if (secs <= 0.0) secs = 0.5;
+	if (secs > 3.0) secs = 3.0;
+	const int chunk = 480;
+	int total = (int)(secs * 24000.0);
+	int workers = VoiceWorkers::WorkerCount();
+
+	struct BP { int eff; const char* name; };
+	static const BP ps[] = {
+		{ AudioEffects::EFF_RADIO, "radio" }, { AudioEffects::EFF_PHONE, "phone" },
+		{ AudioEffects::EFF_STORMTROOPER, "storm" }, { AudioEffects::EFF_COMBINE, "combine" },
+		{ AudioEffects::EFF_PA, "pa" }, { AudioEffects::EFF_MUFFLED, "muffled" }, { AudioEffects::EFF_MASKED, "masked" },
+	};
+	printf("[MetroVoiceFX] CPU self-test on this server (%d worker cores):\n", workers);
+	for (const BP& p : ps) {
+		AudioEffects::PlayerFXState fx;
+		std::unique_ptr<MetroTCN::TCNState> tcn;
+		const MetroTCN::Model* nm = MetroTCN::Get(p.eff);
+		int16_t buf[chunk];
+		for (int i = 0; i < chunk; i++) buf[i] = (int16_t)(((i * 137) % 20000) - 10000);
+		if (nm) { tcn.reset(new MetroTCN::TCNState()); MetroTCN::Process(buf, chunk, *tcn, nm); }  // warmup
+		else VoicePresets::Apply(p.eff, buf, chunk, fx);
+
+		auto t0 = std::chrono::high_resolution_clock::now();
+		for (int done = 0; done < total; done += chunk) {
+			if (nm) MetroTCN::Process(buf, chunk, *tcn, nm);
+			else VoicePresets::Apply(p.eff, buf, chunk, fx);
+		}
+		auto t1 = std::chrono::high_resolution_clock::now();
+		double wall = std::chrono::duration<double>(t1 - t0).count();
+		double rtf = (double)total / 24000.0 / (wall + 1e-9);
+		printf("   %-8s [%-6s] %6.1fx / core   ->  ~%d concurrent talkers\n",
+			p.name, nm ? "neural" : "dsp", rtf, (int)(rtf * workers));
+	}
+	printf("[MetroVoiceFX] under overload neural auto-falls-back to dsp; the game tick is never blocked.\n");
+	fflush(stdout);
+	return 0;
+}
+
 
 GMOD_MODULE_OPEN()
 {
@@ -185,6 +233,10 @@ GMOD_MODULE_OPEN()
 
 		LUA->PushString("EnableEffect");
 		LUA->PushCFunction(eightbit_enableEffect);
+		LUA->SetTable(-3);
+
+		LUA->PushString("Bench");
+		LUA->PushCFunction(eightbit_bench);
 		LUA->SetTable(-3);
 
 		LUA->PushString("EnableBroadcast");

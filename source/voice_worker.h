@@ -261,6 +261,8 @@ namespace VoiceWorkers {
 		return Map().find(userid) != Map().end();
 	}
 
+	inline int WorkerCount() { return (int)Pool().size(); }
+
 	inline std::shared_ptr<Channel> Lookup(int userid) {
 		std::lock_guard<std::mutex> lk(MapMtx());
 		auto it = Map().find(userid);
