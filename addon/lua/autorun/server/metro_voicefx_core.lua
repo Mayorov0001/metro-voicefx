@@ -96,9 +96,11 @@ local function ResolvePreset(ply)
 end
 
 local appliedState = {} -- [userid] = presetName currently set natively
+local vbActive = {}     -- [ply] = { VoiceBox fx names }; the manual VoiceBox API below
 
 function MetroVoice.Refresh(ply)
 	if not IsValid(ply) or not ply:IsPlayer() then return end
+	if vbActive[ply] and #vbActive[ply] > 0 then return end -- manual VoiceBox fx overrides config rules
 
 	local preset = ResolvePreset(ply)
 	local uid = ply:UserID()
@@ -150,6 +152,76 @@ concommand.Add("metrovoice_test", function(ply, _, args)
 	appliedState[ply:UserID()] = preset
 	ply:PrintMessage(HUD_PRINTCONSOLE, "MetroVoiceFX: applied '" .. preset .. "'. Say something in voice chat.")
 end)
+
+-- ============================================================================
+-- VoiceBox FX compatibility layer: exposes the SAME Lua API as the original
+-- VoiceBox FX (ply:AddVoiceFX etc.) so existing server/gamemode code keeps
+-- working with no changes. VoiceBox fx names are mapped to our presets; our
+-- engine plays one effect at a time, so stacked fx resolve to the most recently
+-- added valid one. Manual API use overrides the config rules above.
+-- ============================================================================
+local FX_ALIAS = {
+	Radio = "Radio", Phone = "Phone", Stormtrooper = "Stormtrooper", Combine = "Combine",
+	PA = "PA", PASystem = "PA", PASystemLoud = "PA", ["Public Address System"] = "PA",
+	Muffled = "Muffled", Masked = "Masked",
+}
+
+local function vbResolve(ply)
+	local list = vbActive[ply]
+	if list and #list > 0 and not ply.__mvfx_disabled then
+		for i = #list, 1, -1 do
+			if FX_ALIAS[list[i]] then return list[i], FX_ALIAS[list[i]] end
+		end
+	end
+	return nil, "None"
+end
+
+local function vbApply(ply)
+	if not IsValid(ply) then return end
+	local _, preset = vbResolve(ply)
+	metrovoice.EnableEffect(ply:UserID(), MetroVoice.Presets[preset] or metrovoice.EFF_NONE)
+	appliedState[ply:UserID()] = preset
+	if preset == "None" and (not vbActive[ply] or #vbActive[ply] == 0) then
+		MetroVoice.Refresh(ply) -- fall back to config rules once manual fx are cleared
+	end
+end
+
+local PLY = FindMetaTable("Player")
+
+function PLY:AddVoiceFX(fx)
+	vbActive[self] = vbActive[self] or {}
+	table.insert(vbActive[self], tostring(fx))
+	vbApply(self)
+end
+function PLY:RemoveVoiceFX(fx)
+	local list = vbActive[self]; if not list then return false end
+	for i = #list, 1, -1 do
+		if list[i] == fx then table.remove(list, i); vbApply(self); return true end
+	end
+	return false
+end
+function PLY:ClearVoiceFX() vbActive[self] = {}; vbApply(self) end
+function PLY:GetVoiceFX()
+	local out = {}
+	for _, v in ipairs(vbActive[self] or {}) do out[#out + 1] = v end
+	return out
+end
+function PLY:GetActiveVoiceFX() local name = vbResolve(self); return name end
+function PLY:HasVoiceFX(fx)
+	for _, v in ipairs(vbActive[self] or {}) do if v == fx then return true end end
+	return false
+end
+function PLY:SetVoiceFXDisabled(disabled) self.__mvfx_disabled = disabled and true or false; vbApply(self) end
+function PLY:GetVoiceFXDisabled() return self.__mvfx_disabled or false end
+
+hook.Add("PlayerDisconnected", "MetroVoiceFX_VBCleanup", function(ply) vbActive[ply] = nil end)
+
+VoiceBox = VoiceBox or {}
+VoiceBox.FX = VoiceBox.FX or {}
+function VoiceBox.FX.IsValidVoiceFX(fx) return FX_ALIAS[fx] ~= nil end
+-- Radio static is baked into the preset; the native module has no runtime toggle,
+-- so this stores the flag for API compatibility but does not change the sound.
+function VoiceBox.FX.SetRadioStaticEnabled(enabled) VoiceBox.FX.__radioStatic = enabled and true or false end
 
 include("metro_voicefx_config.lua")
 
